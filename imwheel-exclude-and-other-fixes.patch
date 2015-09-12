@@ -2,8 +2,8 @@ This patch attempts to fix multiple things in imwheel.
 
 It fixes the issue where imwheel stops working after a while 
 when the @Exclude option is used, but also attempts to make
-other changes that make it work more smoothly. Generating thumb 
-buttons with imwheel is still not possible, so you need to 
+other changes that make it work more smoothly. Generating ExtBt
+buttons (>9?) with imwheel is still not possible, so you need to 
 use @Exclude. This is one big fat ugly patch because I have
 no time to split it up into many. It requires all Debian
 patches: https://packages.debian.org/source/jessie/imwheel
@@ -19,13 +19,18 @@ some buttons in apps using: @Exclude=Thumb2,ExtBt7
 Normal @Exclude is also fixed - somewhat - but imwheel
 still grabs button for the wrong window from time to time, 
 and weirdly enough partial one might work better. Ugh.
+(This is not random, and it is an issue with window detection
+and priorities, so changes in the config can workaround it 
+all of the time.)
 
-It should be able to send keys to the window under the mouse
-for consistency, but this is not tested.
+With this patch, it should be able to send keys to the window 
+under the mouse for consistency, but this is not fully tested.
 
 Since both wheels are supported by most apps, you most likely
-need (otherwise you'd have to use partial or full @Exclude)
+need (otherwise you'd have to use partial or full @Exclude):
 imwheel -b "0 0 0 0 8 9 10"
+
+Of course, that depends on how many buttons your mouse has.
 
 There might be some weird inconsistencies when you're not 
 using focus following mouse regarding exclude - the windows
@@ -36,7 +41,8 @@ two options that attempt to fix this:
 The -M option tries to detect the window under the mouse,
 but it is not tested well enough. It also switches the 
 focus after a click, which might be undesired. The -F
-option attempts to remedy that, but it is broken at present.
+option attempts to remedy that by returning the focus, 
+but this is broken at present.
 
 
 diff -ru imwheel-1.0.0pre12/imwheel.c imwheel-1.0.0pre12.fixed/imwheel.c
