@@ -1,0 +1,184 @@
+Description: Update the default button mappings to reflect changes in
+ how X numbers mouse buttons, and just generally clean up a bit.
+Author: Christopher Martin <chrsmrtn@debian.org>
+Last-Update: 2010-02-20
+--- a/imwheelrc
++++ b/imwheelrc
+@@ -17,7 +17,6 @@
+ #".*"
+ #@Priority=-1000 #the default priority is zero, higher numbers take precedence
+ #@Exclude
+-#@Repeat
+ 
+ # want it to type something?
+ # this would type "Rofl" and press Return in any window
+@@ -26,25 +25,6 @@
+ 
+ 
+ 
+-# This one rule can send button events, as if you used ZAxisMapping "4 5"
+-# Make sure your XF86Config allows for the max buttons needed...
+-# otherwise the events will NOT even be generated...
+-#".*"
+-#, Up, Button4
+-#, Down, Button5
+-#, Left, Button6
+-#, Right, Button7
+-#, Thumb1, Button6
+-#, Thumb2, Button7
+-# alternatively with Button numbers
+-#".*"
+-#, Button4, Button4
+-#, Button5, Button5
+-#, Button6, Button6
+-#, Button7, Button7
+-#, Button6, Button6
+-#, Button7, Button7
+-
+ #Thanks to Mathias Weyland <mathias@weyland-wtal.de>
+ "^mutt.*"
+ None,           Up,     Up
+@@ -108,8 +88,6 @@
+ Shift_L,	Down,	Control_L|E
+ #None,		Up,		Page_Up
+ #None,		Down,	Page_Down
+-#,	Up,	Button4
+-#,	Down,	Button5
+ ,	Left,	Shift_L|Left
+ ,	Right,	Shift_L|Right
+ ,	Thumb1,	Shift_L|Left
+@@ -128,8 +106,6 @@
+ #Alt_L,   	Down,   Shift_L|Page_Down
+ 
+ #"^GnomeTerminal"
+-#@Exclude
+-#@Repeat
+ #None,		Up,		Shift_L|Page_Up
+ #None,		Down,	Shift_L|Page_Down
+ 
+@@ -150,11 +126,8 @@
+ 
+ "^VMware"
+ @Exclude
+-#@Repeat
+ 
+ "^Mozilla-bin$"
+-#,	Up,	Button4
+-#,	Down,	Button5
+ #,	Left,	Alt_L|Left
+ #,	Right,	Alt_L|Right
+ #
+@@ -187,14 +160,11 @@
+ ,	Thumb2,	R
+ 
+ "^SDL_App"
+-#,	Up,		Button4
+-#,	Down,	Button5
+ ,	Thumb1,	Home	#many apps don't understand Button > 5
+ ,	Thumb2, End		#many apps don't understand Button > 5
+ 
+ # Thanks to shewp <shewplx@pblx.net>
+ "^Opera" 
+-#@Repeat    # let qt do it
+ None,       Down,   Down,               4,  100,    100
+ None,       Up,     Up,                 4,  100,    100
+ None,       Thumb1, Right
+@@ -203,8 +173,6 @@
+ "^Netscape.*"
+ , Thumb1, Alt_L|KP_Left
+ , Thumb2, Alt_L|KP_Right
+-#, Up, Button4
+-#, Down, Button5
+ 
+ "^Netscape"
+ #
+@@ -250,25 +218,11 @@
+ ,			Down,	j
+ ,			Up,		k
+ 
+-".* - Pan$"
+-,	Left,	Control_L|Button1
+-,	Thumb1,	Control_L|Button1
+-#,	Up,	Button4
+-#,	Down,	Button5
+-
+ # Thanks to etienne grossmann <etienne@isr.ist.utl.pt>
+ "^gv[ :]"
+ None,		Up,		Shift_L|space
+ None,		Down,	space
+ 
+-#"^Event Tester"
+-#@Repeat
+-#@Exclude
+-#,	Left,	Button6
+-#,	Right,	Button7
+-#,	Thumb1,	Button8
+-#,	Thumb2,	Button9
+-
+ "^xv grab"
+ @Priority=1
+ @Exclude
+@@ -278,46 +232,19 @@
+ None,	Up,		Delete
+ 
+ "^Untitled"
+-# if using wheel fifo, you may switch these.
+-#,	Up,		Button4
+-#,	Down,	Button5
+-#with these
+ ,	Up,		Page_Up
+ ,	Down,	Page_Down
+-# (end of switch)
+ ,   Thumb1, Home
+ ,   Thumb2, End
+ 
+ "^No Title"
+-# if using wheel fifo, you may switch these.
+-#,	Up,		Button4
+-#,	Down,	Button5
+-#with these
+ ,	Up,		Page_Up
+ ,	Down,	Page_Down
+-# (end of switch)
+ ,   Left, Home
+ ,   Right, End
+ ,   Thumb1, Home
+ ,   Thumb2, End
+ 
+-#"\(null\)"
+-# if using wheel fifo, you may want the 2nd group
+-#,	Up,		Button4
+-#,	Down,	Button5
+-#,	Left, Button6
+-#,	Right, Button7
+-#,	Thumb1, Button8
+-#,	Thumb2, Button9
+-# 2nd group (old keys...)
+-#,	Up,		Page_Up
+-#,	Down,	Page_Down
+-#,	Left, Home
+-#,	Right, End
+-#,	Thumb1, Home
+-#,	Thumb2, End
+-# (end of switch)
+-
+ # send event to the window manager when in the root window...
+ "\(root\)"
+ ,	Up,		Control_L|N
+@@ -334,7 +261,6 @@
+ #".*"
+ #@Priority=-1000
+ #@Exclude
+-#@Repeat
+ 
+ #
+ # These are the defaults, but note that the defaults for the right side of the
+@@ -346,8 +272,6 @@
+ #
+ #".*"
+ #@Priority=-1001
+-#,	Up,	Button4
+-#,	Down,	Button5
+ #None,							Left,	Left
+ #None,							Right,	Right
+ #None,							Up,		Page_Up

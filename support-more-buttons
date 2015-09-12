@@ -1,0 +1,443 @@
+Description: Several code changes here: 1) eliminate irrelevant or deprecated
+ imwheel options; 2) add support for more than 9 buttons; and 3) grab a few
+ upstream changes that were never released.
+Author: Thomas Liebetraut <thomas@tommie-lie.de> and Christopher Martin <chrsmrtn@debian.org>
+Last-Update: 2010-02-20
+--- a/imwheel.c
++++ b/imwheel.c
+@@ -59,22 +59,18 @@
+ 	//{"restart",		0,			0,		'R'}, //not used by users!
+ 	{"root-window",		0,			0,		'r'},
+ 	{"quit",			0,			0,		'q'},
+-	{"sensitivity",		1,			0,		's'},
+-	{"threshhold",		1,			0,		't'},
+ 	{"version",			0,			0,		'v'},
+-	{"wheel-fifo",		2,			0,		'W'},
+-	{"transpose",		0,			0,		'x'},
+ 	{0,					0,			0,		0}
+ };
+ const char *optionusage[][2]=
+ { /*{argument name,		usage}*/
+ 	{"delay-rate",		"auto repeat until button release (default=250)"},			//a
+-	{"grab-buttons",	"Specify up to 6 remappings 0=none (default=456789)"},		//b
++	{"grab-buttons",	"Specify button remappings (default=\"4 5 6 7 8 9\", 0=skip)"},//b
+ 	{NULL,				"Open configuration helper window imediately"},				//c
+ 	{NULL,				"Spit out all debugging info (it's a lot!)"},				//D
+ 	{NULL,				"IMWHeel process doesn't detach from terminal"},			//d
+-	{"display-name",	"Sets X display to use (one per FIFO if FIFO used)"},		//X
+-	{NULL,				"Swaps buttons 4 and 5 events (same as -b 54"},				//4
++	{"display-name",		"Sets X display to use"},		//X
++	{NULL,				"Swaps buttons 4 and 5 events (same as -b \"5 4\")"},				//4
+ 	{NULL,				"Use event subwindow instead of XGetInputFocus"},			//f
+ 	{NULL,				"Disable the use of Focus Events for button grabs"},		//g
+ 	{NULL,				"For this help!  Now you know"},							//h
+@@ -84,11 +80,7 @@
+ 	//{NULL,				"RESERVED: used when imwheel reloads itself"},			//R
+ 	{NULL,				"Allow wheeling in the root window (no cfg dialog)"},		//r
+ 	{NULL,				"Don't start imwheel process, after args"},					//q
+-	{"sum-min",			"Stick devices require this much total movment (w/fifo)"},	//s
+-	{"stick-min",		"Stick devices require this much pressure (w/fifo)"},		//t
+ 	{NULL,				"Show version info and exit"},								//v
+-	{"fifo-path",		"Use a GPM fifo instead of XGrabButton"},					//W
+-	{NULL,				"swap X and Y stick axis (w/fifo)"},						//x
+ 	{NULL,				NULL}
+ };
+ int buttonFlip=False, useFifo=False, detach=True, quit=False,
+@@ -108,6 +100,7 @@
+ 
+ 	getOptions(argc,argv,opts,options);
+ 	setupstatebits();
++	setupbuttonnames();
+ 	if(!displayName)
+ 		displayName=XDisplayName(NULL);
+ 	Printf("display=%s\n",displayName);
+@@ -137,7 +130,7 @@
+ 		return;
+ 	Printf("Grab buttons!\n");
+ 	grabbed=True;
+-	for(i=0;i<NUM_BUTTONS;i++)
++	for(i=0;i<buttons_cnt;i++)
+ 	{
+ 		if(buttons[i])
+ 		{
+@@ -168,7 +161,7 @@
+ 	Printf("Ungrab buttons!\n");
+ 	XSync(d,False);
+ 	grabbed=False;
+-	for(i=0;i<NUM_BUTTONS;i++)
++	for(i=0;i<buttons_cnt;i++)
+ 	{
+ 		if(buttons[i])
+ 		{
+@@ -331,7 +324,7 @@
+ 	{
+ 		//e->xbutton.button^=buttonFlip;
+ 		button= buttonIndex(e->xbutton.button);
+-		if(button<NUM_BUTTONS)
++		if(button<buttons_cnt)
+ 			e->xbutton.button= button= button+4;
+ 		XQueryKeymap(d,km);
+ 		if(debug)
+@@ -635,9 +628,9 @@
+ 						int k;
+ 
+ 						j=button-4;
+-						if(j>=NUM_BUTTONS)
++						if(j>=buttons_cnt)
+ 						{
+-							Printf("No we aren't because j(%d) is >= NUM_BUTTONS(%d)!\n",j,NUM_BUTTONS);
++							Printf("No we aren't because j(%d) is >= NUM_BUTTONS(%d)!\n",j,buttons_cnt);
+ 							break;
+ 						}
+ 						k=statebits[makeModMask(xmk,km)&STATE_MASK];
+@@ -647,6 +640,11 @@
+ 							break;
+ 						}
+ 						
++						// simply cut off all new buttons and map the odd ones to "Thumb1" and
++						// the even ones to "Thumb2"
++						if (j>NUM_STDCOMMANDS) // we have NUM_STDCOMMANDS standard actions
++							j = 5 - (j % 2); // all odds become a 4, all evens a 5
++						
+ 						out[0]=(char*)keys[j][k];
+ 						wa.reps=reps[k];
+ 						doWA(d,(XButtonEvent*)&e.xbutton,xmk,km,&wa);
+--- a/util.h
++++ b/util.h
+@@ -10,7 +10,7 @@
+ 
+ #define PIDFILE PIDDIR"/imwheel.pid"
+ 
+-#define NUM_BUTTONS 6
++#define NUM_STDCOMMANDS 6
+ #define STATE_MASK (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask)
+ #define NUM_STATES 3
+ #define MAX_MASKTRANS 8
+@@ -42,17 +42,18 @@
+ 	int delayup;//microsecond delay while key down
+ };
+ 
+-extern int buttons[NUM_BUTTONS+1];
++extern int *buttons;
++extern int buttons_cnt;
+ extern int statebits[STATE_MASK+1];
+ extern int debug;
+ extern struct WinAction *wa;
+ extern int num_wa;
+ extern struct Trans masktrans[MAX_MASKTRANS];
+ extern const int reps[1<<NUM_STATES];
+-extern const char *keys[NUM_BUTTONS][1<<NUM_STATES];
++extern const char *keys[NUM_STDCOMMANDS][1<<NUM_STATES];
+ extern char *wname;
+ extern XClassHint xch;
+-extern const char *button_names[];
++extern char *(*button_names)[];
+ extern Atom ATOM_NET_WM_NAME, ATOM_UTF8_STRING, ATOM_WM_NAME, ATOM_STRING;
+ 
+ void getOptions(int,char**,char*,const struct option*);
+@@ -66,6 +67,7 @@
+ int getbit(char*, int);
+ void setbit(char*, int, Bool);
+ void setupstatebits(void);
++void setupbuttonnames(void);
+ int isMod(XModifierKeymap*, int);
+ unsigned int makeModMask(XModifierKeymap*, char[32]);
+ unsigned int makeKeysymModMask(Display*,XModifierKeymap*, char**);
+--- a/util.c
++++ b/util.c
+@@ -9,6 +9,7 @@
+ #include <stdarg.h>
+ #include <string.h>
+ #include <signal.h>
++#include <ctype.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <regex.h>
+@@ -51,15 +52,9 @@
+ 
+ typedef void (*sighandler_t)(int);
+ 
+-int buttons[NUM_BUTTONS+1]={4,5,6,7,8,9,0};
+-const char *button_names[]={
+-	"Up",
+-	"Down",
+-	"Left",
+-	"Right",
+-	"Thumb1",
+-	"Thumb2"
+-};
++int *buttons = NULL;
++int buttons_cnt = 0;
++char *(*button_names)[] = NULL;
+ int statebits[STATE_MASK+1];
+ char *wname=NULL;
+ XClassHint xch={NULL,NULL};
+@@ -92,7 +87,7 @@
+ 	20,			//          ControlMask|Mod1Mask
+ 	50			//ShiftMask|ControlMask|Mod1Mask
+ };
+-const char *keys[NUM_BUTTONS][1<<NUM_STATES]=
++const char *keys[NUM_STDCOMMANDS][1<<NUM_STATES]=
+ {
+ 	{
+ 		"Page_Up",		//None
+@@ -184,6 +179,43 @@
+ 
+ /*----------------------------------------------------------------------------*/
+ 
++void setupbuttonnames()
++{
++	char buf[10 + 5 + 1]; // strlen(2^31=2147483648) + strlen("ExtBt") + NULL
++	int i;
++	
++	// allocate enough memory (buttons_cnt should be known by now)
++	Printf("Allocating %d names\n", buttons_cnt);
++	button_names = malloc(buttons_cnt * sizeof(char *) + 1000);
++
++	// we have the 6 legacy buttons, but only as many as the user has declared
++	switch ((buttons_cnt<=6)?buttons_cnt:6)
++	{
++		case 6:
++			(*button_names)[5] = "Thumb2";
++		case 5:
++			(*button_names)[4] = "Thumb1";
++		case 4:
++			(*button_names)[3] = "Right";
++		case 3:
++			(*button_names)[2] = "Left";
++		case 2:
++			(*button_names)[1] = "Down";
++		case 1:
++			(*button_names)[0] = "Up";
++			break;
++	}
++	// add the remaining extended buttons	
++	for (i=6; i<buttons_cnt; i++)
++	{
++		snprintf(buf, 16, "ExtBt%d", i +1);
++		(*button_names)[i] = malloc(strlen(buf)+1);
++		strcpy((*button_names)[i], buf);
++	}
++}
++
++/*----------------------------------------------------------------------------*/
++
+ RETSIGTYPE exitParent(int num)
+ {
+ 	exit(0);
+@@ -196,11 +228,11 @@
+ 	int i;
+ 
+ 	Printf("isUsedButton(%d)=",b);
+-	for(i=0;i<NUM_BUTTONS;i++)
++	for(i=0;i<buttons_cnt;i++)
+ 		if(buttons[i]==b)
+ 			break;
+-	Printf("%s\n",i<NUM_BUTTONS?"yes":"no");
+-	return i<NUM_BUTTONS;
++	Printf("%s\n",i<buttons_cnt?"yes":"no");
++	return i<buttons_cnt;
+ }
+ 
+ /*----------------------------------------------------------------------------*/
+@@ -209,10 +241,10 @@
+ {
+ 	int i;
+ 
+-	for(i=0;i<NUM_BUTTONS;i++)
++	for(i=0;i<buttons_cnt;i++)
+ 		if(buttons[i]==b)
+ 			return(i);
+-	return(NUM_BUTTONS);
++	return(buttons_cnt);
+ }
+ 
+ /*----------------------------------------------------------------------------*/
+@@ -220,6 +252,8 @@
+ void getOptions(int argc, char **argv, char *opts, const struct option *options)
+ {
+ 	int ch,i,j,killold=False,invalidOpts=False;
++	char *ButtonOpt = NULL;
++
+ 
+ 	while((ch=getopt_long_only(argc,argv,opts,options,&i))>=0)
+ 	{
+@@ -296,6 +330,16 @@
+ 				exit(0);
+ 				break;
+ 			case 'b':
++				for (j = 0; j < strlen(optarg); j++)
++					if (optarg[j] == ' ')
++						buttons_cnt++;
++				buttons_cnt++;
++				buttons = malloc(sizeof(int) * buttons_cnt);
++				ButtonOpt = strtok(optarg, " ");
++				for(j = 0; ButtonOpt != NULL; ButtonOpt = strtok(NULL, " "), j++)
++					buttons[j] = atoi(ButtonOpt);
++
++/*
+ 				memset(buttons,0,NUM_BUTTONS*sizeof(int));
+ 				for(j=0;optarg[j] && j<NUM_BUTTONS;j++)
+ 				{
+@@ -306,6 +350,7 @@
+ 					}
+ 					buttons[j]=optarg[j]-'0';
+ 				}
++*/
+ 				break;
+ 			case 'h':
+ 			case '?':
+@@ -317,6 +362,12 @@
+ 		}
+ 		Printf("\n");
+ 	}
++	if(buttons_cnt == 0) {
++		buttons_cnt = 6;
++		buttons = malloc(sizeof(int) * buttons_cnt);
++		for(j = 0; j < buttons_cnt; j++)
++			buttons[j] = j+4;
++	}
+ 	if(invalidOpts)
+ 		exit(1);
+ 	if(!restart)
+@@ -525,7 +576,7 @@
+ 	int i,maxa=0,maxb=0,len;
+ 	char str[80];
+ 
+-	printf("imwheel %s by -=<Long Island Man>=- <jcatki@jonatkins.org>\n",VERSION);
++	printf("imwheel %s by -=<Long Island Man>=- <jcatki@jcatki.no-ip.org>\n",VERSION);
+ 	if(!options || !usage)
+ 		return;
+ 	printf("%s",pname);
+@@ -564,12 +615,13 @@
+ 	for(i=0;options[i].name;i++)
+ 	{
+ 		*str=0;
+-		if(options[i].name)
+-			sprintf(str,"--%s",options[i].name);
+-		if(options[i].val && options[i].name)
+-			sprintf(str,"%s|",str);
++		sprintf(str,"%s%s%s ",
++				options[i].name?"--":"",
++				options[i].name?options[i].name:"",
++				options[i].name&&options[i].val?"|-":
++					options[i].val?"-":"");
+ 		if(options[i].val)
+-			sprintf(str,"%s-%c",str,options[i].val);
++			str[strlen(str)-1]=options[i].val;
+ 		printf("%-*.*s",maxa,maxa,str);
+ 		if(usage[i][0])
+ 			printf(" %-*.*s",maxb,maxb,usage[i][0]);
+@@ -847,7 +899,8 @@
+ 				exitString("expected 3 args, got 1, in config.\n%s\n",line);
+ 			Printf("Keysym mask: \"%s\"\n",line);
+ 			newwa[num_wa-1].in=getPipeArray(line);
+-			memmove(line,p+1,strlen(p+1)+1);
++			for(p++; isspace(*p); p++);
++			memmove(line,p,strlen(p)+1);
+ 			//Get Button
+ 			p=strchr(line,',');
+ 			if(p)
+@@ -859,16 +912,16 @@
+ 			{
+ 				sscanf(line+6,"%d",&i);
+ 				Printf("(Button%d)",i);
+-				if(i>NUM_BUTTONS)
+-					i=NUM_BUTTONS;
++				if(i>buttons_cnt)
++					i=buttons_cnt;
+ 				else
+ 					newwa[num_wa-1].button=i;
+ 			}
+ 			else
+ 			{
+-				for(i=0; i<NUM_BUTTONS; i++)
++				for(i=0; i<buttons_cnt; i++)
+ 				{
+-					if(!strcasecmp(line,button_names[i]))
++					if(!strcasecmp(line,(*button_names)[i]))
+ 					{
+ 						if(buttons[i])
+ 							newwa[num_wa-1].button=i+4;//buttons[i];
+@@ -878,12 +931,12 @@
+ 					}
+ 				}
+ 			}
+-			if(i==NUM_BUTTONS) // nothing found
++
++			if(i==buttons_cnt) // nothing found
+ 			{
+-				if(!strncasecmp(line,button_names[4],strlen(button_names[4])-1))
+-					newwa[num_wa-1].button=buttons[4];
+-				else
+-					exitString("Unrecognized wheel action in config.\n%s\n",line);
++
++				fprintf(stderr, "Unrecognized wheel action in config. Ignoring action.\n%s\n", line);
++				newwa[num_wa-1].button = 0;
+ 			}
+ 			Printf("\t=%d\n",newwa[num_wa-1].button);
+ 			if(!newwa[num_wa-1].button)
+@@ -895,7 +948,8 @@
+ 				newwa[num_wa].id=NULL;
+ 				continue;
+ 			}
+-			memmove(line,p+1,strlen(p+1)+1);
++			for(p++; isspace(*p); p++);
++			memmove(line,p,strlen(p)+1);
+ 			//Get Keysym Out
+ 			p=strchr(line,',');
+ 			if(p)
+@@ -908,7 +962,10 @@
+ 			else
+ 				exitString("Unrecognized or missing Keysym Outs (arg 3) in config.\n%s\n",line);
+ 			if(p)
+-				memmove(line,p+1,strlen(p+1)+1);
++			{
++				for(p++; isspace(*p); p++);
++				memmove(line,p,strlen(p)+1);
++			}
+ 			else
+ 				continue;
+ 			//Get Reps
+@@ -921,7 +978,10 @@
+ 				newwa[num_wa-1].reps=strtol(line,NULL,10);
+ 			}
+ 			if(p)
+-				memmove(line,p+1,strlen(p+1)+1);
++			{
++				for(p++; isspace(*p); p++);
++				memmove(line,p,strlen(p)+1);
++			}
+ 			else
+ 				continue;
+ 			//Get Delay
+@@ -934,7 +994,10 @@
+ 				newwa[num_wa-1].delay=strtol(line,NULL,10);
+ 			}
+ 			if(p)
+-				memmove(line,p+1,strlen(p+1)+1);
++			{
++				for(p++; isspace(*p); p++);
++				memmove(line,p,strlen(p)+1);
++			}
+ 			else
+ 				continue;
+ 			//Get Delay Up
+@@ -1079,7 +1142,7 @@
+ 		perror("imwheel,writeRC");
+ 		return;
+ 	}
+-	fprintf(f,"# IMWheel Configuration file (%s)\n# (C)Jon Atkins <jcatki@jonatkins.org>\n#\n# Generated by imwheel\n# Any extra comments will be lost on reconfiguration\n# However order will be maintained\n# Order!  ORDER, I SAY!!\n",fname);
++	fprintf(f,"# IMWheel Configuration file (%s)\n# (C)Jon Atkins <jcatki@jcatki.no-ip.org>\n#\n# Generated by imwheel\n# Any extra comments will be lost on reconfiguration\n# However order will be maintained\n# Order!  ORDER, I SAY!!\n",fname);
+ 	for(cur=NULL,p=wa;p->id;p=&p[1])
+ 	{
+ 		if(!cur || strcmp(cur->id,p->id))
+@@ -1091,7 +1154,7 @@
+ 		{
+ 			for(i=0; p->in[i]; i++)
+ 				fprintf(f,"%s%s",(i?"|":""),p->in[i]);
+-			fprintf(f,",\t%s,\t",button_names[p->button-4]);
++			fprintf(f,",\t%s,\t",(*button_names)[p->button-4]);
+ 			for(i=0; p->out[i]; i++)
+ 				fprintf(f,"%s%s",(i?"|":""),p->out[i]);
+ 			if(p->delayup>0||p->delay>0||p->reps>1||p->reps==0)

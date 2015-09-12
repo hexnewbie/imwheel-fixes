@@ -1,0 +1,974 @@
+This patch attempts to fix multiple things in imwheel.
+
+It fixes the issue where imwheel stops working after a while 
+when the @Exclude option is used, but also attempts to make
+other changes that make it work more smoothly. Generating thumb 
+buttons with imwheel is still not possible, so you need to 
+use @Exclude. This is one big fat ugly patch because I have
+no time to split it up into many. It requires all Debian
+patches: https://packages.debian.org/source/jessie/imwheel
+
+Sorry for any unnecessary stuff in the patch, it's a bit of 
+a mess.
+
+Fixes: 
+
+It introduces partial exclude, so you can exclude only
+some buttons in apps using: @Exclude=Thumb2,ExtBt7
+
+Normal @Exclude is also fixed - somewhat - but imwheel
+still grabs button for the wrong window from time to time, 
+and weirdly enough partial one might work better. Ugh.
+
+It should be able to send keys to the window under the mouse
+for consistency, but this is not tested.
+
+Since both wheels are supported by most apps, you most likely
+need (otherwise you'd have to use partial or full @Exclude)
+imwheel -b "0 0 0 0 8 9 10"
+
+There might be some weird inconsistencies when you're not 
+using focus following mouse regarding exclude - the windows
+get their clicks when your mouse is over them, but imwheel
+grabs keys depending on the window in focus. There are 
+two options that attempt to fix this:
+
+The -M option tries to detect the window under the mouse,
+but it is not tested well enough. It also switches the 
+focus after a click, which might be undesired. The -F
+option attempts to remedy that, but it is broken at present.
+
+
+diff -ru imwheel-1.0.0pre12/imwheel.c imwheel-1.0.0pre12.fixed/imwheel.c
+--- imwheel-1.0.0pre12/imwheel.c	2015-09-12 12:29:58.000000000 +0300
++++ imwheel-1.0.0pre12.fixed/imwheel.c	2015-09-12 12:19:22.000000000 +0300
+@@ -24,6 +24,7 @@
+ #include "cfg.h"
+ #include "imwheel.h"
+ #include <X11/Xmu/WinUtil.h>
++#include <X11/Xatom.h>
+ 
+ #define HISTORY_LENGTH 3
+ #define CONFIG_TIME 4
+@@ -40,7 +41,7 @@
+ 
+ /*----------------------------------------------------------------------------*/
+ 
+-char *opts="a:b:c4fgiW:dpDKkRrqh?X:t:vxs:";
++char *opts="a:b:c4fgMFSiW:dpDKkRrqh?X:t:vxs:";
+ const struct option options[]=
+ { /*{name,			need/opt_arg,	flag,	val}*/
+ 	{"auto-repeat",		1,			0,		'a'},
+@@ -52,6 +53,9 @@
+ 	{"flip-buttons",	0,			0,		'4'},
+ 	{"focus",			0,			0,		'f'},
+ 	{"focus-events",	0,			0,		'g'},
++	{"mouse-focus",		0,			0,		'M'},
++	{"return-focus",	0,			0,		'F'},
++	//{"send-events",		0,			0,		'S'}, //broken
+ 	{"help",			0,			0,		'h'},
+ 	{"key-defaults",	0,			0,		'K'},
+ 	{"kill",			0,			0,		'k'},
+@@ -73,6 +77,9 @@
+ 	{NULL,				"Swaps buttons 4 and 5 events (same as -b \"5 4\")"},				//4
+ 	{NULL,				"Use event subwindow instead of XGetInputFocus"},			//f
+ 	{NULL,				"Disable the use of Focus Events for button grabs"},		//g
++	{NULL,				"Use mouse position instead of focus (do not use with -g/-f)"},//M
++	{NULL,				"When using mouse focus, return the focus after action"},//M
++	//{NULL,				"No focus switch (consistent -M, XSendEvent-ok apps only)"},//S
+ 	{NULL,				"For this help!  Now you know"},							//h
+ 	{NULL,				"Use the old key style default actions"},					//K
+ 	{NULL,				"Kills the running imwheel process"},						//k
+@@ -86,11 +93,16 @@
+ int buttonFlip=False, useFifo=False, detach=True, quit=False,
+     restart=False, threshhold=0, focusOverride=True, sensitivity=0, transpose=False,
+ 	handleFocusGrab=True, doConfig=False, root_wheeling=False, autodelay=250,
+-	keystyledefaults=0;
++	keystyledefaults=0, mouseFocus=False, useSendEvent=False, returnFocus=False;
+ int fifofd=-1;
+ char *fifoName="/dev/gpmwheel", *displayName=NULL;
+ Bool grabbed;
+ Atom ATOM_NET_WM_NAME, ATOM_UTF8_STRING, ATOM_WM_NAME, ATOM_STRING;
++int xerror = 0;
++
++
++uint64_t current_excludemask;
++
+ 
+ /*----------------------------------------------------------------------------*/
+ 
+@@ -122,17 +134,30 @@
+ 
+ /*----------------------------------------------------------------------------*/
+ 
+-void grabButtons(Display *d, Window w)
++void grabButtonsCustom(Display *d, Window w, uint64_t exclude_mask) 
+ {
+ 	int i;
+ 
+ 	if(useFifo)
+ 		return;
+-	Printf("Grab buttons!\n");
++
++	if(grabbed)
++	{
++		if (current_excludemask != exclude_mask)
++			ungrabButtons(d, w);
++		else
++			return;
++	}
++
++	Printf("Grab buttons! %llx!\n", exclude_mask);
+ 	grabbed=True;
++	current_excludemask=exclude_mask;
++
++	uint64_t mask = ~exclude_mask;
++
+ 	for(i=0;i<buttons_cnt;i++)
+ 	{
+-		if(buttons[i])
++		if(buttons[i] && mask & (1 << buttons[i]))
+ 		{
+ 			Printf("Grabbing Button %d...\n",buttons[i]);
+ 			XGrabButton(
+@@ -150,6 +175,11 @@
+ 	}
+ }
+ 
++void grabButtons(Display *d, Window w)
++{
++	grabButtonsCustom(d, w, 0);
++}
++
+ /*----------------------------------------------------------------------------*/
+ 
+ void ungrabButtons(Display *d, Window w)
+@@ -161,6 +191,7 @@
+ 	Printf("Ungrab buttons!\n");
+ 	XSync(d,False);
+ 	grabbed=False;
++	current_excludemask = ALL_BUTTONS_MASK;
+ 	for(i=0;i<buttons_cnt;i++)
+ 	{
+ 		if(buttons[i])
+@@ -179,6 +210,157 @@
+ 	XSync(d,False);
+ }
+ 
++Bool checkWindow(Display *d, Window win) {
++    //Atom wm_name = XInternAtom(d, "WM_NAME", True);
++    Atom wm_name = XInternAtom(d, "WM_CLASS", True);
++    Atom wm_state = XInternAtom(d, "WM_STATE", True);
++
++    unsigned char *property;
++
++    unsigned long nitems;
++    unsigned long bytes;
++    Atom type;
++    int format, status;
++
++    XWindowAttributes xwa;
++
++    XGetWindowAttributes(d, win, &xwa);
++    if (xwa.class != InputOutput || xwa.map_state != IsViewable) {
++        return False;
++    }
++
++    property = NULL;
++    status = XGetWindowProperty(d, win, wm_name, 0, (~0L),
++                                False, AnyPropertyType, &type,
++                                &format, &nitems, &bytes,
++                                &property);
++    if (property)
++        XFree(property);
++    if (status != Success || !nitems) {
++        return False;
++    }
++
++    property = NULL;
++    status = XGetWindowProperty(d, win, wm_state, 0, (~0L),
++                                    False, AnyPropertyType, &type,
++                                    &format, &nitems, &bytes,
++                                    &property);
++    if (property)
++        XFree(property);
++
++    if (status != Success || !nitems) {
++        XFree(property);
++        return False;
++    }
++
++    return True;
++}
++
++Window getWindowFromChildren(Display *d, Window win) {
++    Window foo, parent;
++    Status status;
++    unsigned int n;
++    int j;
++    Window *wins;
++
++    status = XQueryTree(d, win, &foo, &parent, &wins, &n);
++    if (status == 0) {
++        //Printf("!!!!!!!!!! Window: %d; NO Children\n");
++        return win;
++    }
++
++    //Printf("!!!!!!!!!! Window: %d; Children: %d, parent: %d\n", (int) win, n, (int) parent);
++    for (j = (int) n - 1; j >= 0; j--) {
++        //Printf("!!!!!!!!!! Window: %d -> CHILD %d\n", (int) win, (int) wins[j]);
++        XWindowAttributes xwa;
++
++        XGetWindowAttributes(d, wins[j], &xwa);
++        if (xwa.class != InputOutput || xwa.map_state != IsViewable) {
++            wins[j] = None;
++            continue;
++        }
++
++        if (checkWindow(d, wins[j])) {
++            //Printf("!!!!!!!!!! Subwindow is a-OK: %d\n", (int) wins[j]);
++            win = wins[j];
++            goto done;
++        }
++    }
++
++    for (j = (int) n - 1; j >= 0; j--) {
++        if (wins[j] == None)
++            continue;
++        Window candidate = getWindowFromChildren(d, wins[j]);
++        if (candidate != None && candidate != wins[j]) {
++            win = candidate;
++            goto done;
++        }
++    }
++
++done:
++    XFree(wins);
++   // Printf("!!!!!!!!!! Final Window: %d\n", (int) win);
++    return win;
++}
++
++Window getCursorWindow(Display *d) {
++    Window foo;
++    Window win;
++    Window *roots = NULL;
++    Atom type;
++    unsigned long i;
++    int format, status;
++    unsigned long nroots = 0, nrootsbytes = 0;
++    int bar;
++
++    Atom virt_roots = XInternAtom(d, "_NET_VIRTUAL_ROOTS", True);
++
++    if (virt_roots != None) {
++
++        status = XGetWindowProperty(d, DefaultRootWindow(d),
++                                    virt_roots, 0, (~0L),
++                                    False, XA_WINDOW, &type,
++                                    &format, &nroots, &nrootsbytes,
++                                    (unsigned char**) &roots);
++        if (status != Success) {
++            roots = NULL;
++            nroots = 0;
++        }
++    }
++
++    Window cur_root = DefaultRootWindow(d);
++    int is_still_root = 1;
++    do {
++        do {
++            (void) XQueryPointer(d, cur_root, &foo, &win,
++                                 &bar, &bar, &bar, &bar, &bar);
++
++        } while(win <= 0);
++
++        is_still_root = 0;
++
++        for (i = 0; i < nroots; i++) {
++            //Printf("!!!!!!!! ROOOT CHECK %d ?= %d\n", (int) roots[i], win);
++            if (roots[i] == win) {
++                //Printf("!!!!!!!! ROOOT MATCH %d = %d\n", (int) roots[i], win);
++                is_still_root = 1;
++                cur_root = win;
++                break;
++            }
++        }
++    } while (is_still_root);
++
++    if (roots)
++        XFree(roots);
++        
++    if (checkWindow(d, win)) {
++        //Printf("!!!!!!!!!! Main window is a-OK: %d\n", (int) win);
++        return win;
++    }
++
++    return getWindowFromChildren(d, win);
++}
++
+ /*----------------------------------------------------------------------------*/
+ 
+ Display *start(char *display)
+@@ -202,6 +384,47 @@
+ 	{
+ 		grabButtons(d,0);
+ 		XSelectInput(d,DefaultRootWindow(d),PointerMotionMask);
++
++		if (!mouseFocus) {
++			Window w, wnew; 
++			int ignored;
++			const struct timespec retry_period = {0, 10000000};
++			do { 
++				do {
++					XGetInputFocus(d, &w, &ignored);
++					if (w == PointerRoot || w == None)
++						nanosleep(&retry_period, NULL);
++				} while (w == PointerRoot || w == None);
++
++				xerror = 0;
++				XSelectInput(d, w, FocusChangeMask | StructureNotifyMask);
++				XGetInputFocus(d, &wnew, &ignored);
++				if (xerror == BadWindow || wnew != w) {
++					nanosleep(&retry_period, NULL);
++					Printf("THIS HAPPENED %d, %d !!!!\n", (int) (xerror == BadWindow), (int) (wnew != w));
++				}
++			} while (xerror == BadWindow || wnew != w);
++	        }
++		else {
++			Window w, wnew, root;
++			int ig1, ig2, ig3, ig4;
++			unsigned int ig5;
++			const struct timespec retry_period = {0, 10000000};
++			do {
++				XQueryPointer(d, DefaultRootWindow(d), &root, &w, 
++				              &ig1, &ig2, &ig3, &ig4, &ig5);
++				//w = getCursorWindow(d);
++				xerror = 0;
++				XSelectInput(d, w, LeaveWindowMask | StructureNotifyMask);
++				XQueryPointer(d, DefaultRootWindow(d), &root, &wnew, 
++				              &ig1, &ig2, &ig3, &ig4, &ig5);
++				//wnew = getCursorWindow(d);
++				if (xerror == BadWindow || wnew != w) {
++					nanosleep(&retry_period, NULL);
++					Printf("THIS HAPPENED %d, %d !!!!\n", (int) (xerror == BadWindow), (int) (wnew != w));
++				}
++			} while (xerror == BadWindow || wnew != w);
++	        }
+ 	}
+ 	return(d);
+ }
+@@ -319,6 +542,16 @@
+ 			}
+ 		}
+ 	}
++
++	if(e->type==DestroyNotify)
++	{
++		Printf("Window destroyed!!!!!!!!!!!!!!!!!!!!\n");
++		if (mouseFocus)
++			e->type = LeaveNotify;
++		else
++			e->type = FocusOut;
++	}
++
+ 	if(e->type==ButtonPress
+ 	   && (isUsedButton(e->xbutton.button) || (!useFifo && grabbed)))
+ 	{
+@@ -336,16 +569,65 @@
+ 	else
+ 	{
+ 		e->xbutton.button=button=0;
+-		e->type=None;
++		if (e->type != FocusOut && e->type != LeaveNotify)
++			e->type=None;
+ 	}
+-	if(handleFocusGrab && e->type==FocusOut && (!useFifo && !grabbed))
++	if(handleFocusGrab && e->type==FocusOut && (!useFifo))
+ 	{
++		Window w, wnew; 
++		int ignored;
++		const struct timespec retry_period = {0, 10000000};
++
+ 		// the focus is leaving the @Exclude´d window,
+ 		// so we want to grab the buttons again
+-		grabButtons(d,0);
++//		if (!grabbed)
++//			grabButtons(d,0);
+ 		// we don't need any further events from that window for now
+ 		// we asked for events during ungrab...below
+ 		XSelectInput(d, e->xany.window, NoEventMask);
++		do {
++			do {
++				XGetInputFocus(d, &w, &ignored);
++				if (w == PointerRoot || w == None)
++					nanosleep(&retry_period, NULL);
++			} while (w == PointerRoot || w == None);
++
++			xerror = 0;
++			XSelectInput(d, w, FocusChangeMask | StructureNotifyMask);
++			XGetInputFocus(d, &wnew, &ignored);
++			if (xerror == BadWindow || wnew != w) {
++				nanosleep(&retry_period, NULL);
++				Printf("THIS HAPPENED %d, %d !!!!\n", (int) (xerror == BadWindow), (int) (wnew != w));
++			}
++		} while (xerror == BadWindow || wnew != w);
++
++	}
++	if(handleFocusGrab && mouseFocus && e->type==LeaveNotify && (!useFifo))
++	{
++		Window w, wnew, root;
++		int ig1, ig2, ig3, ig4, ig5;
++		const struct timespec retry_period = {0, 10000000};
++
++//		if (!grabbed)
++//			grabButtons(d,0);
++		XSelectInput(d, e->xany.window, NoEventMask);
++
++		do {
++			XQueryPointer(d, DefaultRootWindow(d), &root, &w, 
++			              &ig1, &ig2, &ig3, &ig4, &ig5);
++			//w = getCursorWindow(d);
++
++			xerror = 0;
++			XSelectInput(d, w, LeaveWindowMask | StructureNotifyMask);
++			XQueryPointer(d, DefaultRootWindow(d), &root, &wnew, 
++			              &ig1, &ig2, &ig3, &ig4, &ig5);
++			//wnew = getCursorWindow(d);
++			if (xerror == BadWindow || wnew != w) {
++				nanosleep(&retry_period, NULL);
++				Printf("THIS HAPPENED %d, %d !!!!\n", (int) (xerror == BadWindow), (int) (wnew != w));
++			}
++		} while (xerror == BadWindow || wnew != w);
++
+ 	}
+ 	if(e->type==ButtonPress)
+ 		Printf("getInput: Button=%d\n",button);
+@@ -412,17 +694,20 @@
+ 	XModifierKeymap *xmk=NULL;
+ 	signed char km[32],button;
+ 	struct WinAction *wap=NULL, *ungrabwap=NULL, *grabwap=NULL;
++	uint64_t new_excludemask = 0;
+ 	Window oldw=0;
+ 	int isdiffwin;
+ 	struct {time_t t; int motion;} history[HISTORY_LENGTH];
+ 
+ 	XSetErrorHandler((XErrorHandler)nullXError);
++	XSynchronize(d, True);
+ 	if(doConfig)
+ 		openCfg(d,argv,&xmk);
+ 	memset(history,0,sizeof(history));
+ 	while(True)
+ 	{
+-		int i;
++		Window oldFocus;
++		int i, ignored;
+ 		if(!useFifo || !wap || wap->reps) // auto-repeat kinda eats fifo events :(
+ 			getInput(d,&e,&xmk,km);
+ 		if(!e.type)
+@@ -430,9 +715,16 @@
+ 		button=e.xbutton.button;
+ 		//get current input window & it's name
+ 		i=CurrentTime;
+-		if(focusOverride || !e.xbutton.subwindow) //not up to ICCCM standards
++		if(focusOverride || mouseFocus || !e.xbutton.subwindow) { //not up to ICCCM standards
+ 			// focusOverride: default is true, so this is the default action
+-			XGetInputFocus(d,&e.xbutton.subwindow,&i);
++			Window root;
++			if (!mouseFocus)
++				XGetInputFocus(d,&e.xbutton.subwindow,&i);
++			else
++				//XQueryPointer(d,DefaultRootWindow(d),&root,&e.xbutton.subwindow,&i,&i,&i,&i,&i);
++				e.xbutton.subwindow = getCursorWindow(d);
++
++		}
+ 		else
+ 		{ /* pulled from xwininfo */
+ 			Window root,window=e.xbutton.subwindow;
+@@ -476,7 +768,7 @@
+ 							XFree(kids);
+ 					}
+ 					Printf("w:%p r:%p ew:%p et:%d\n",win, root, e.xbutton.subwindow, e.type);
+-				} while(!wname && root!=win && root);
++				} while(!wname && root!=win && e.xbutton.subwindow!=win && root);
+ 		}
+ 		isdiffwin=(e.xbutton.subwindow!=oldw);
+ 		oldw=e.xbutton.subwindow;
+@@ -507,27 +799,33 @@
+ 					Printf("class name           =\"%s\"\n",xch.res_class);
+ 				}
+ 				break;
+-		}
++		}	
+ 		if (!wname) wname = strdup(emptystr);
+ 		if (!xch.res_name) xch.res_name = strdup(emptystr);
+ 		if (!xch.res_class) xch.res_class = strdup(emptystr);
+ 		ungrabwap=0;
+ 		grabwap=0;
++		new_excludemask=0;
+ 		if(!useFifo)
+ 		{
+-			if(isdiffwin || e.type==ButtonPress)
++			if(isdiffwin || e.type==ButtonPress || e.type == FocusOut || e.type == LeaveNotify)
+ 			{
+ 				ungrabwap=findWA(d,UNGRAB,
+ 						wname,
+ 						xch.res_name,
+ 						xch.res_class,
+ 						NULL,NULL);
+-				if(ungrabwap)
++				if(ungrabwap && ungrabwap->exclude_mask != ALL_BUTTONS_MASK) {
++					new_excludemask = ungrabwap->exclude_mask;
++					ungrabwap = 0;
++				}
++				if(ungrabwap) {
+ 					grabwap=findWA(d,GRAB,
+ 							wname,
+ 							xch.res_name,
+ 							xch.res_class,
+ 							NULL,NULL);
++				}
+ 				if(grabwap)
+ 				{
+ 					Printf("Action defined for window overrides ungrab command\n");
+@@ -541,12 +839,17 @@
+ 			Printf("grabbed=%d\n",grabbed);
+ 			Printf("e.type=%d\n",e.type);
+ #endif
+-			if(ungrabwap && grabbed && (e.type==ButtonPress || e.type==FocusIn || !e.type))
++			if(ungrabwap && grabbed && (e.type==ButtonPress || e.type==FocusIn || e.type == FocusOut || e.type == LeaveNotify || !e.type))
+ 				e.type=MotionNotify;
+ 			// force a regrab try
+ 			if(!ungrabwap && !grabwap && !grabbed && isdiffwin)
+ 				e.type=MotionNotify;
++			if(new_excludemask != current_excludemask)
++				e.type=MotionNotify;
++			if(e.type == FocusOut || e.type == LeaveNotify)
++				e.type=MotionNotify;
+ 		}
++		Printf("wname=%s,wid=%d\n", wname,e.xbutton.subwindow);
+ 		switch(e.type) // now we actually do something!
+ 		{
+ 			case MotionNotify:
+@@ -559,13 +862,13 @@
+ 						if(handleFocusGrab)
+ 						{
+ 							// notify us when the focus leaves this window
+-							XSelectInput(d, e.xbutton.subwindow,
+-									FocusChangeMask);
++							//XSelectInput(d, e.xbutton.subwindow,
++							//		FocusChangeMask);
+ 						}
+ 					}
+ 					else
+-						if(!grabbed)
+-							grabButtons(d,0);
++						if(!grabbed || new_excludemask != current_excludemask)
++							grabButtonsCustom(d,0,new_excludemask);
+ 				}
+ 				break;
+ 			case ButtonPress:
+@@ -618,7 +921,15 @@
+ 
+ 						snprintf(bstr,9,"Button%-2d",button);
+ 						out[0]=bstr;
++						if (mouseFocus && !useSendEvent) {
++							if (returnFocus)
++								XGetInputFocus(d, &oldFocus, &ignored);
++							XSetInputFocus(d,e.xbutton.subwindow,RevertToParent,CurrentTime);
++						}
++						Printf("Sending event to 0x%x\n", (int) e.xbutton.subwindow);
+ 						doWA(d,(XButtonEvent*)&e.xbutton,xmk,km,&wa);
++						if (returnFocus && mouseFocus && !useSendEvent)
++							XSetInputFocus(d,oldFocus,RevertToParent,CurrentTime);
+ 					}
+ 					else
+ 					{	/* old key style... */
+@@ -647,8 +958,15 @@
+ 						
+ 						out[0]=(char*)keys[j][k];
+ 						wa.reps=reps[k];
++						if (mouseFocus && !useSendEvent) {
++							if (returnFocus)
++								XGetInputFocus(d, &oldFocus, &ignored);
++							XSetInputFocus(d,e.xbutton.subwindow,RevertToParent,CurrentTime);
++						}
++						Printf("Sending event to 0x%x\n", (int) e.xbutton.subwindow);
+ 						doWA(d,(XButtonEvent*)&e.xbutton,xmk,km,&wa);
+-
++						if (returnFocus && mouseFocus && !useSendEvent)
++							XSetInputFocus(d,oldFocus,RevertToParent,CurrentTime);
+ 						/* old code...
+ 						int kc=XKeysymToKeycode(d, XStringToKeysym(keys[j][k]));
+ 						Printf("keycode=%d\n",kc);
+@@ -667,8 +985,17 @@
+ 						*/
+ 					}
+ 				}
+-				else
++				else {
++					if (mouseFocus && !useSendEvent) {
++						if (returnFocus)
++							XGetInputFocus(d, &oldFocus, &ignored);
++						XSetInputFocus(d,e.xbutton.subwindow,RevertToParent,CurrentTime);
++					}
++					Printf("Sending event to 0x%x\n", (int) e.xbutton.subwindow);
+ 					doWA(d,(XButtonEvent*)&e.xbutton,xmk,km,wap);
++					if (returnFocus && mouseFocus && !useSendEvent)
++						XSetInputFocus(d,oldFocus,RevertToParent,CurrentTime);
++				}
+ 				XTestGrabControl(d,False);
+ 				//XQueryPointer(d,DefaultRootWindow(d),&e.xbutton.subwindow,&e.xbutton.subwindow,&i,&i,&i,&i,&i);
+ 				//XSetInputFocus(d,e.xbutton.subwindow,RevertToParent,CurrentTime);
+@@ -711,7 +1038,7 @@
+ {
+ 	signed char errorstr[1024];
+ 
+-	grabbed=False;
++	//grabbed=False;
+ 	Printf("XError: \n");
+ 	Printf("\tserial      : %lu\n",e->serial);
+ 	Printf("\terror_code  : %u\n",e->error_code);
+@@ -720,6 +1047,7 @@
+ 	Printf("\tresourceid  : %lu\n",e->resourceid);
+ 	XGetErrorText(d,e->error_code,errorstr,1024);
+ 	Printf("\terror string: %s\n",errorstr);
++	xerror = e->error_code;
+ 	return(0);
+ }
+ 
+diff -ru imwheel-1.0.0pre12/imwheel.h imwheel-1.0.0pre12.fixed/imwheel.h
+--- imwheel-1.0.0pre12/imwheel.h	2004-08-29 13:22:12.000000000 +0300
++++ imwheel-1.0.0pre12.fixed/imwheel.h	2015-09-12 12:19:22.000000000 +0300
+@@ -19,7 +19,8 @@
+ extern Bool grabbed;
+ extern int buttonFlip, useFifo, detach, quit, restart, threshhold,
+ 			focusOverride, sensitivity, transpose, handleFocusGrab, doConfig,
+-			root_wheeling, autodelay, keystyledefaults;
++			root_wheeling, autodelay, keystyledefaults, mouseFocus, useSendEvent,
++			returnFocus;
+ extern int fifofd;
+ extern char *fifoName, *displayName;
+ extern Stick stick;
+diff -ru imwheel-1.0.0pre12/util.c imwheel-1.0.0pre12.fixed/util.c
+--- imwheel-1.0.0pre12/util.c	2015-09-12 12:29:58.000000000 +0300
++++ imwheel-1.0.0pre12.fixed/util.c	2015-09-12 12:19:22.000000000 +0300
+@@ -284,6 +284,15 @@
+ 			case 'g':
+ 				handleFocusGrab=!handleFocusGrab;
+ 				break;
++			case 'M':
++				mouseFocus=!mouseFocus;
++				break;
++			case 'F':
++				returnFocus=!returnFocus;
++				break;
++			case 'S':
++				useSendEvent=!useSendEvent;
++				break;
+ 			case 'X':
+ 				displayName=strdup(optarg);
+ 				break;
+@@ -490,12 +499,13 @@
+ 
+ void printXEvent(XEvent *e)
+ {
++	Printf("====================\n");
+ 	Printf("type=%d\n",e->type);
+ 	Printf("serial    =%lu\n",e->xany.serial);
+ 	Printf("send_event=%d\n",e->xany.send_event);
+ 	Printf("display   =%p\n",e->xany.display);
+ 	Printf("window    =0x%08x\n",(unsigned)e->xany.window);
+-	if(e->type&(ButtonRelease|ButtonPress))
++	if(e->type == ButtonRelease || e->type == ButtonPress)
+ 	{
+ 		Printf("root         =0x%08x\n",(unsigned)e->xbutton.root);
+ 		Printf("subwindow    =0x%08x\n",(unsigned)e->xbutton.subwindow);
+@@ -507,6 +517,18 @@
+ 		Printf("same_screen  =0x%x\n",(unsigned)e->xbutton.same_screen);
+ 		Printf("\n");
+ 	}
++	if(e->type == KeyRelease || e->type == KeyPress)
++	{
++		Printf("root         =0x%08x\n",(unsigned)e->xkey.root);
++		Printf("subwindow    =0x%08x\n",(unsigned)e->xkey.subwindow);
++		Printf("time         =0x%08x\n",(unsigned)e->xkey.time);
++		Printf("     x,y     =%d,%d\n",e->xkey.x,e->xkey.y);
++		Printf("x_root,y_root=%d,%d\n",e->xkey.x_root,e->xkey.y_root);
++		Printf("state        =0x%x\n",(unsigned)e->xkey.state);
++		Printf("keycode      =0x%x\n",(unsigned)e->xkey.keycode);
++		Printf("same_screen  =0x%x\n",(unsigned)e->xkey.same_screen);
++		Printf("\n");
++	}
+ }
+ 
+ /*----------------------------------------------------------------------------*/
+@@ -871,14 +893,40 @@
+ 			newwa[num_wa].delayup=0;
+ 			newwa[num_wa].pri=pri;
+ 			newwa[num_wa].button=0;
++			newwa[num_wa].exclude_mask=0;
+ 			num_wa++;
+ 			//Get Command (if any)
+ 			if(line[0]=='@')
+ 			{
+ 				if(!strcasecmp(line+1,"Exclude"))
++				{
++					newwa[num_wa-1].exclude_mask=ALL_BUTTONS_MASK;
+ 					newwa[num_wa-1].button=UNGRAB;
++				}
+ 				else if(!strcasecmp(line+1,"Repeat"))
+ 					newwa[num_wa-1].button=REPEAT;
++				else if(!strncasecmp(line+1,"Exclude=",8))
++				{
++					char *arg = line + 9;
++					char *tok;
++
++					newwa[num_wa-1].exclude_mask=0;
++					newwa[num_wa-1].button=UNGRAB;
++
++					for (tok = strtok(arg, ","); tok != NULL; tok = strtok(NULL, ","))
++					{
++						
++						for(i=0; i<buttons_cnt; i++)
++						{
++							if(!strcasecmp(tok,(*button_names)[i]))
++							{
++								if(buttons[i])
++									newwa[num_wa-1].exclude_mask |= 1 << buttons[i];
++								break;
++							}
++						}
++					}
++				}
+ 				else if(!strncasecmp(line+1,"Priority=",9))
+ 				{
+ 					pri=strtol(line+10,NULL,10);
+@@ -1367,15 +1415,60 @@
+ 	Printf("doWA:\n");
+ 	printWA(wap);
+ 
++	Bool doSendEvent = False;
++	if (mouseFocus && useSendEvent) {
++		Window focus;
++		int ignored;
++		XGetInputFocus(d, &focus, &ignored);
++		if (focus != e->subwindow)
++			doSendEvent = True;
++	}
++
++	XButtonEvent xbutev;
++	XKeyEvent xkeyev;
++
++	if (doSendEvent) {
++		xbutev = *e;
++		xbutev.window = e->subwindow;
++		xbutev.subwindow = None;
++
++		xkeyev.display = d;
++		xkeyev.subwindow = e->subwindow;
++		xkeyev.time = CurrentTime;
++		xkeyev.same_screen = True;
++		//xkeyev.window = e->window;
++		xkeyev.window = e->subwindow;
++		//xkeyev.subwindow = e->subwindow;
++		xkeyev.subwindow = None;
++		xkeyev.state = 0;
++	}
++
+ 	if(wap->button==REPEAT)
+ 	{
+ 		Printf("doWA: button down = %d\n",e->button);
+-		XTestFakeButtonEvent(d,e->button,True,CurrentTime);
++
++		if (doSendEvent) {
++			xbutev.time = CurrentTime;
++			xbutev.type = ButtonPress;
++			printXEvent((XEvent *) &xbutev);
++			XSendEvent(d, e->subwindow, True, ButtonPressMask,
++			           (XEvent *) &xbutev);
++		}
++		else
++			XTestFakeButtonEvent(d,e->button,True,CurrentTime);
+ 		XFlush(d);
+ 		/*Printf("doWA: button delay...\n");
+ 		delay(1000); */
+ 		Printf("doWA: button up = %d\n",e->button);
+-		XTestFakeButtonEvent(d,e->button,False,CurrentTime);
++		if (doSendEvent) {
++			xbutev.time = CurrentTime;
++			xbutev.type = ButtonRelease;
++			printXEvent((XEvent *) &xbutev);
++			XSendEvent(d, e->subwindow, True, ButtonPressMask,
++			           (XEvent *) &xbutev);
++		}
++		else
++			XTestFakeButtonEvent(d,e->button,False,CurrentTime);
+ 		XFlush(d);
+ 		Printf("doWA: button done\n");
+ 		return;
+@@ -1385,13 +1478,19 @@
+ 		Printf("doWA: UNGRAB cannot be handled here: use @Repeat or resend the Button# in the imwheelrc, i.e. None,Up,Button4\n");
+ 		return;
+ 	}
+-	
++
++
+ 	for(rep=0; rep<wap->reps || !wap->reps; rep++)
+ 	{
+ 		if(wap->reps)
+ 			Printf("rep=%d\n",rep);
+ 		//XSetInputFocus(d,e->subwindow,RevertToParent,CurrentTime);
+-		modMods(d,km,xmk,False,0);
++		if (doSendEvent) {
++			xkeyev.state = km[0] | km[1] << 8 | km[2] << 16 | km[3] << 24;
++			xbutev.state = xkeyev.state;
++		}
++		else
++			modMods(d,km,xmk,False,0);
+ 		//XSync(d,False); //this seems to cause apps to receive crud at random times!
+ 		memset(nkm,0,8192);
+ 		memset(nbm,0,16);
+@@ -1402,13 +1501,29 @@
+ 				if(wap->out[i][0]!='-')
+ 				{
+ 					kc=XKeysymToKeycode(d, XStringToKeysym(wap->out[i]));
+-					XTestFakeKeyEvent(d,kc,True,CurrentTime);
++					if (doSendEvent) {
++						xkeyev.keycode = kc;
++						xkeyev.type = KeyPress;
++						printXEvent((XEvent *) &xkeyev);
++						XSendEvent(d, e->subwindow, True, KeyPressMask,
++						           (XEvent *) &xkeyev);
++					}
++					else
++						XTestFakeKeyEvent(d,kc,True,CurrentTime);
+ 					setbit(nkm,kc,True);
+ 				}
+ 				else
+ 				{
+ 					kc=XKeysymToKeycode(d, XStringToKeysym(wap->out[i]+1));
+-					XTestFakeKeyEvent(d,kc,False,CurrentTime);
++					if (doSendEvent) {
++						xkeyev.keycode = kc;
++						xkeyev.type = KeyRelease;
++						printXEvent((XEvent *) &xkeyev);
++						XSendEvent(d, e->subwindow, True, KeyPressMask,
++						           (XEvent *) &xkeyev);
++					}
++					else
++						XTestFakeKeyEvent(d,kc,False,CurrentTime);
+ 					setbit(nkm,kc,False);
+ 				}
+ 			}
+@@ -1418,14 +1533,32 @@
+ 				if(wap->out[i][6]!='-')
+ 				{
+ 					button=strtoul(wap->out[i]+6,NULL,10);
+-					XTestFakeButtonEvent(d,button,True,CurrentTime);
++					if (doSendEvent) {
++						xbutev.time = CurrentTime;
++						xbutev.type = ButtonPress;
++						xbutev.button = button;
++						printXEvent((XEvent *) &xbutev);
++						XSendEvent(d, e->subwindow, True, ButtonPressMask,
++						           (XEvent *) &xbutev);
++					}
++					else
++						XTestFakeButtonEvent(d,button,True,CurrentTime);
+ 					if(button<256)
+ 						setbit(nbm,button,True);
+ 				}
+ 				else
+ 				{
+ 					button=strtoul(wap->out[i]+7,NULL,10);
+-					XTestFakeButtonEvent(d,button,False,CurrentTime);
++					if (doSendEvent) {
++						xbutev.time = CurrentTime;
++						xbutev.type = ButtonRelease;
++						xbutev.button = button;
++						printXEvent((XEvent *) &xbutev);
++						XSendEvent(d, e->subwindow, True, ButtonPressMask,
++						           (XEvent *) &xbutev);
++					}
++					else
++						XTestFakeButtonEvent(d,button,False,CurrentTime);
+ 					if(button<256)
+ 						setbit(nbm,button,False);
+ 				}
+@@ -1444,7 +1577,15 @@
+ 					kc=XKeysymToKeycode(d, XStringToKeysym(wap->out[i]));
+ 					if(getbit(nkm,kc))
+ 					{
+-						XTestFakeKeyEvent(d,kc,False,CurrentTime);
++						if (doSendEvent) {
++							xkeyev.keycode = kc;
++							xkeyev.type = KeyRelease;
++							printXEvent((XEvent *) &xkeyev);
++							XSendEvent(d, e->subwindow, True, KeyPressMask,
++							           (XEvent *) &xkeyev);
++						}
++						else
++							XTestFakeKeyEvent(d,kc,False,CurrentTime);
+ 						setbit(nkm,kc,False);
+ 					}
+ 				}
+@@ -1457,7 +1598,16 @@
+ 					button=strtoul(wap->out[i]+6,NULL,10);
+ 					if(button>=256 || getbit(nbm,button))
+ 					{
+-						XTestFakeButtonEvent(d,button,False,CurrentTime);
++						if (doSendEvent) {
++							xbutev.time = CurrentTime;
++							xbutev.type = ButtonRelease;
++							xbutev.button = button;
++							printXEvent((XEvent *) &xbutev);
++							XSendEvent(d, e->subwindow, True, ButtonPressMask,
++							           (XEvent *) &xbutev);
++						}
++						else
++							XTestFakeButtonEvent(d,button,False,CurrentTime);
+ 						if(button<256)
+ 							setbit(nbm,button,False);
+ 					}
+@@ -1467,8 +1617,12 @@
+ 			}
+ 		}
+ 		XSync(d,False);
+-		modMods(d,km,xmk,True,0);
+-		XSync(d,False);
++
++		if (!doSendEvent) {
++			modMods(d,km,xmk,True,0);
++			XSync(d,False);
++		}
++
+ 		if(wap->delay)
+ 		{
+ 			Printf("doWA: nextkey delay=%d\n",wap->delay);
+diff -ru imwheel-1.0.0pre12/util.h imwheel-1.0.0pre12.fixed/util.h
+--- imwheel-1.0.0pre12/util.h	2015-09-12 12:29:58.000000000 +0300
++++ imwheel-1.0.0pre12.fixed/util.h	2015-09-12 12:19:22.000000000 +0300
+@@ -7,6 +7,7 @@
+ #define UTIL_H
+ #include <config.h>
+ #include <getopt.h>
++#include <stdint.h>
+ 
+ #define PIDFILE PIDDIR"/imwheel.pid"
+ 
+@@ -24,6 +25,7 @@
+ 	PRIORITY=800
+ };
+ #define MIN_COMMAND UNGRAB
++#define ALL_BUTTONS_MASK 0xffffffffffffffff
+ 
+ struct Trans
+ {
+@@ -40,6 +42,7 @@
+ 	int reps;	//number of repetitions
+ 	int delay;	//microsecond delay until next keypress
+ 	int delayup;//microsecond delay while key down
++	uint64_t exclude_mask; // Buttons to ungrab
+ };
+ 
+ extern int *buttons;

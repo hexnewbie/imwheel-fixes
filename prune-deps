@@ -1,0 +1,14 @@
+Description: Eliminate an unnecessary dependency.
+Author: Christopher Martin <chrsmrtn@debian.org>
+Last-Update: 2010-02-20
+--- a/configure.in
++++ b/configure.in
+@@ -321,8 +321,6 @@
+ AC_CHECK_LIB(X11, XCreateWindow,, [
+ 	AC_MSG_ERROR([IMWheel depends on the X11 libraries!])
+ ], $LIBS_saved $X_LIBS)
+-AC_CHECK_LIB(Xext, XextAddDisplay,,,$LIBS_saved $X_LIBS)
+-AC_CHECK_LIB(Xt, XtFree,,,$LIBS_saved $X_LIBS)
+ AC_CHECK_LIB(Xmu, XmuInternAtom,,,$LIBS_saved $X_LIBS)
+ AC_CHECK_LIB(Xtst, XTestFakeDeviceKeyEvent,, [
+ 	AC_MSG_ERROR([IMWheel depends on the XTest extention!])
